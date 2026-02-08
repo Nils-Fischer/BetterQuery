@@ -1,0 +1,17 @@
+# Local reference clone (not part of this project)
+tanstack-query/
+
+# Build outputs
+build/
+.build/
+DerivedData/
+
+# Xcode user/state files
+*.xcuserstate
+xcuserdata/
+
+# SwiftPM generated project files
+.swiftpm/
+
+# macOS files
+.DS_Store
