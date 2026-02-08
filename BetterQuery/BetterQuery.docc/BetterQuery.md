@@ -16,7 +16,7 @@ Use Swift Package Manager:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/<your-org>/BetterQuery.git", from: "0.1.0")
+    .package(url: "https://github.com/Nils-Fischer/BetterQuery.git", from: "0.1.0")
 ]
 ```
 

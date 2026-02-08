@@ -217,6 +217,10 @@ Exit criteria:
 - Swift Package Manager distribution support added:
   - `Package.swift` with `BetterQuery` library product and `BetterQueryTests` test target.
   - package builds and tests pass via `swift test`.
+- Release/readme artifacts added:
+  - root `README.md` with SPM installation and SwiftUI observable quick start.
+  - `CHANGELOG.md` with initial `0.1.0` release notes.
+  - DocC installation snippet updated to the public GitHub repository URL.
 - Core `QueryClient` and state model implemented with:
   - key hashing + partial key filtering
   - cache records with status/fetchStatus/error/data timestamps
