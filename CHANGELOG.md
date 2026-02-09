@@ -6,17 +6,34 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Breaking API simplification to hook-first, throwing query functions.
+- Replaced `QueryOptions<Data, Failure>` with `QueryOptions<Data>` and `queryFn`.
+- Replaced `QueryState<Data, Failure>` with `QueryResult<Data>` (erased errors).
+- Added `QueryResult.result` computed value (`Result<Data, any Error>?`).
+- Renamed primary APIs:
+  - `fetch` -> `fetchQuery`
+  - `prefetch` -> `prefetchQuery`
+  - `refetch` -> `refetchQuery`
+  - `observe` -> `observeQuery`
+- SwiftUI observables now use erased errors:
+  - `QueryObservable<Data>`
+  - `QueriesObservable<Data, Combined>`
+- Renamed SwiftUI factory helpers:
+  - `makeQueryObservable` -> `useQuery`
+  - `makeQueriesObservable` -> `useQueries`
+
+### Verified
+
+- Test suite passing (`14` tests) after migration.
+
+## 0.2.0 - 2026-02-09
+
+### Changed
+
 - Breaking API refactor to Result-first typed failures.
-- Replaced `QueryOptions<Data>` (`queryFn`) with `QueryOptions<Data, Failure>` (`query` returning `Result<Data, Failure>`).
-- Replaced `QueryResult<Data>` with `QueryState<Data, Failure>`.
-- Replaced primary APIs:
-  - `fetch(_:)`
-  - `prefetch(_:)`
-  - `refetch(_:cancelRefetch:)`
-  - `observe(_:)`
-- SwiftUI observables are now typed on failure:
-  - `QueryObservable<Data, Failure>`
-  - `QueriesObservable<Data, Failure, Combined>`
+- Replaced throw-based query functions with `QueryOptions<Data, Failure>` (`query` returning `Result`).
+- Replaced `QueryResult<Data>` with typed `QueryState<Data, Failure>`.
+- SwiftUI observables moved to typed failure generics.
 
 ### Verified
 

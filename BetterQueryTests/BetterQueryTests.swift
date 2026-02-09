@@ -69,55 +69,72 @@ struct BetterQueryTests {
         return false
     }
 
-    @Test func fetchReadsFromCacheWhenFresh() async {
+    private func castSampleError(_ error: (any Error)?) -> SampleError? {
+        guard let error else { return nil }
+        return error as? SampleError
+    }
+
+    @Test func fetchQueryReadsFromCacheWhenFresh() async throws {
         let client = QueryClient()
         let counter = Counter()
         let key: QueryKey = [.string("cache"), .string("hit")]
 
-        let options = QueryOptions<String, SampleError>(
+        let options = QueryOptions<String>(
             queryKey: key,
-            query: { _ in
+            queryFn: { _ in
                 await counter.increment()
-                return .success("data")
+                return "data"
             },
             staleTime: .infinity
         )
 
-        let first = await client.fetch(options)
-        let second = await client.fetch(options)
+        let first = try await client.fetchQuery(options)
+        let second = try await client.fetchQuery(options)
 
-        #expect(first == .success("data"))
-        #expect(second == .success("data"))
+        #expect(first == "data")
+        #expect(second == "data")
         #expect(await counter.value == 1)
     }
 
-    @Test func typedFailurePropagatesFromFetchAndRefetch() async {
+    @Test func throwingFailurePropagatesFromFetchAndRefetch() async {
         let client = QueryClient()
-        let options = QueryOptions<String, SampleError>(
+        let options = QueryOptions<String>(
             queryKey: [.string("typed"), .string("fetch")],
-            query: { _ in .failure(.failed(7)) },
+            queryFn: { _ in throw SampleError.failed(7) },
             retry: .disabled
         )
 
-        let fetchResult = await client.fetch(options)
-        let refetchResult = await client.refetch(options)
+        do {
+            _ = try await client.fetchQuery(options)
+            #expect(Bool(false))
+        } catch let error as SampleError {
+            #expect(error == .failed(7))
+        } catch {
+            #expect(Bool(false))
+        }
 
-        #expect(fetchResult == .failure(.failed(7)))
-        #expect(refetchResult == .failure(.failed(7)))
+        do {
+            _ = try await client.refetchQuery(options)
+            #expect(Bool(false))
+        } catch let error as SampleError {
+            #expect(error == .failed(7))
+        } catch {
+            #expect(Bool(false))
+        }
     }
 
-    @Test func observeEmitsTypedError() async {
+    @Test func observeQueryEmitsErrorAndResultFailure() async {
         let client = QueryClient()
-        let options = QueryOptions<String, SampleError>(
+        let options = QueryOptions<String>(
             queryKey: [.string("typed"), .string("observe")],
-            query: { _ in .failure(.failed(1)) },
+            queryFn: { _ in throw SampleError.failed(1) },
             retry: .disabled
         )
 
-        let stream = await client.observe(options)
+        let stream = await client.observeQuery(options)
         var iterator = stream.makeAsyncIterator()
 
-        var failed: QueryState<String, SampleError>?
+        var failed: QueryResult<String>?
         for _ in 0..<4 {
             guard let next = await iterator.next() else { break }
             if next.isError {
@@ -127,45 +144,90 @@ struct BetterQueryTests {
         }
 
         #expect(failed?.isError == true)
-        #expect(failed?.error == .failed(1))
+        #expect(castSampleError(failed?.error) == .failed(1))
+
+        switch failed?.result {
+        case let .failure(error):
+            #expect((error as? SampleError) == .failed(1))
+        default:
+            #expect(Bool(false))
+        }
     }
 
-    @Test func fetchDefaultRetryIsDisabled() async {
+    @Test func queryResultComputedResultSuccessAndFailureMappings() async throws {
+        let client = QueryClient()
+
+        let successOptions = QueryOptions<String>(
+            queryKey: [.string("result"), .string("success")],
+            queryFn: { _ in "ok" }
+        )
+        _ = try await client.fetchQuery(successOptions)
+        let successState = await client.getQueryResult(successOptions)
+        switch successState.result {
+        case let .success(value):
+            #expect(value == "ok")
+        default:
+            #expect(Bool(false))
+        }
+
+        let failureOptions = QueryOptions<String>(
+            queryKey: [.string("result"), .string("failure")],
+            queryFn: { _ in throw SampleError.failed(4) },
+            retry: .disabled
+        )
+        _ = try? await client.fetchQuery(failureOptions)
+        let failureState = await client.getQueryResult(failureOptions)
+        switch failureState.result {
+        case let .failure(error):
+            #expect((error as? SampleError) == .failed(4))
+        default:
+            #expect(Bool(false))
+        }
+    }
+
+    @Test func fetchQueryDefaultRetryIsDisabled() async {
         let client = QueryClient()
         let counter = Counter()
 
-        let options = QueryOptions<String, SampleError>(
+        let options = QueryOptions<String>(
             queryKey: [.string("retry"), .string("fetch-default")],
-            query: { _ in
+            queryFn: { _ in
                 await counter.increment()
-                return .failure(.failed(1))
+                throw SampleError.failed(1)
             }
         )
 
-        let result = await client.fetch(options)
-        #expect(result == .failure(.failed(1)))
+        do {
+            _ = try await client.fetchQuery(options)
+            #expect(Bool(false))
+        } catch let error as SampleError {
+            #expect(error == .failed(1))
+        } catch {
+            #expect(Bool(false))
+        }
+
         #expect(await counter.value == 1)
     }
 
-    @Test func observeDefaultRetryIsThreeAttempts() async {
+    @Test func observeQueryDefaultRetryIsThreeAttempts() async {
         let client = QueryClient()
         let counter = Counter()
         let key: QueryKey = [.string("retry"), .string("observe-default")]
 
-        let options = QueryOptions<String, SampleError>(
+        let options = QueryOptions<String>(
             queryKey: key,
-            query: { _ in
+            queryFn: { _ in
                 await counter.increment()
                 let value = await counter.value
                 if value < 4 {
-                    return .failure(.failed(value))
+                    throw SampleError.failed(value)
                 }
-                return .success("ok")
+                return "ok"
             },
             retryDelay: .milliseconds(1)
         )
 
-        let stream = await client.observe(options)
+        let stream = await client.observeQuery(options)
         let subscription = Task {
             for await _ in stream {}
         }
@@ -185,11 +247,11 @@ struct BetterQueryTests {
         let counter = Counter()
         let recorder = IntRecorder()
 
-        let options = QueryOptions<String, SampleError>(
+        let options = QueryOptions<String>(
             queryKey: [.string("retry"), .string("delay-index")],
-            query: { _ in
+            queryFn: { _ in
                 await counter.increment()
-                return .failure(.failed(9))
+                throw SampleError.failed(9)
             },
             retry: .maxAttempts(2),
             retryDelay: .resolver { failureCount, _ in
@@ -198,8 +260,15 @@ struct BetterQueryTests {
             }
         )
 
-        let result = await client.refetch(options)
-        #expect(result == .failure(.failed(9)))
+        do {
+            _ = try await client.refetchQuery(options)
+            #expect(Bool(false))
+        } catch let error as SampleError {
+            #expect(error == .failed(9))
+        } catch {
+            #expect(Bool(false))
+        }
+
         #expect(await counter.value == 3)
         #expect(recorder.snapshot() == [0, 1, 2])
     }
@@ -208,16 +277,16 @@ struct BetterQueryTests {
         let client = QueryClient()
         let counter = Counter()
 
-        let options = QueryOptions<String, SampleError>(
+        let options = QueryOptions<String>(
             queryKey: [.string("status"), .string("split")],
-            query: { _ in
+            queryFn: { _ in
                 await counter.increment()
-                try? await Task.sleep(nanoseconds: 20_000_000)
-                return .success("ok")
+                try await Task.sleep(nanoseconds: 20_000_000)
+                return "ok"
             }
         )
 
-        let stream = await client.observe(options)
+        let stream = await client.observeQuery(options)
         var iterator = stream.makeAsyncIterator()
 
         let first = await iterator.next()
@@ -239,17 +308,17 @@ struct BetterQueryTests {
         let counter = Counter()
         let key: QueryKey = [.string("invalidate"), .int(1)]
 
-        let options = QueryOptions<Int, SampleError>(
+        let options = QueryOptions<Int>(
             queryKey: key,
-            query: { _ in
+            queryFn: { _ in
                 await counter.increment()
-                return .success(await counter.value)
+                return await counter.value
             },
             staleTime: .infinity
         )
 
-        _ = await client.fetch(options)
-        let stream = await client.observe(options)
+        _ = try await client.fetchQuery(options)
+        let stream = await client.observeQuery(options)
         let subscription = Task {
             for await _ in stream {}
         }
@@ -263,29 +332,92 @@ struct BetterQueryTests {
         #expect(done)
     }
 
-    @Test func queryObservableTypedErrorAndRefetch() async {
+    @Test func refetchCancelRefetchFalseReusesInFlightFetch() async throws {
         let client = QueryClient()
         let counter = Counter()
 
-        let options = QueryOptions<Int, SampleError>(
+        let options = QueryOptions<Int>(
+            queryKey: [.string("refetch"), .string("reuse")],
+            queryFn: { _ in
+                await counter.increment()
+                try await Task.sleep(nanoseconds: 120_000_000)
+                return await counter.value
+            },
+            retry: .disabled
+        )
+
+        async let first: Int = client.refetchQuery(options, cancelRefetch: false)
+        try await Task.sleep(nanoseconds: 20_000_000)
+        async let second: Int = client.refetchQuery(options, cancelRefetch: false)
+
+        let (a, b) = try await (first, second)
+        #expect(a == 1)
+        #expect(b == 1)
+        #expect(await counter.value == 1)
+    }
+
+    @Test func refetchCancelRefetchTrueCancelsAndRestartsFetch() async {
+        let client = QueryClient()
+        let counter = Counter()
+
+        let options = QueryOptions<Int>(
+            queryKey: [.string("refetch"), .string("restart")],
+            queryFn: { _ in
+                await counter.increment()
+                try await Task.sleep(nanoseconds: 120_000_000)
+                return await counter.value
+            },
+            retry: .disabled
+        )
+
+        _ = try? await client.fetchQuery(options)
+
+        async let first: Int = client.refetchQuery(options, cancelRefetch: true)
+        try? await Task.sleep(nanoseconds: 20_000_000)
+
+        let secondResult: Int
+        do {
+            secondResult = try await client.refetchQuery(options, cancelRefetch: true)
+        } catch {
+            #expect(Bool(false))
+            return
+        }
+
+        do {
+            let firstResult = try await first
+            #expect(firstResult == 1)
+        } catch {
+            // If cancellation is observed as an error, that's also valid here.
+            #expect(error is CancellationError || error is QueryClientInfrastructureError)
+        }
+
+        #expect(secondResult == 3)
+        #expect(await counter.value == 3)
+    }
+
+    @Test func useQueryFactoryTransitionsAndRefetches() async {
+        let client = QueryClient()
+        let counter = Counter()
+
+        let options = QueryOptions<Int>(
             queryKey: [.string("observable"), .string("single")],
-            query: { _ in
+            queryFn: { _ in
                 await counter.increment()
                 let value = await counter.value
                 if value == 1 {
-                    return .failure(.failed(value))
+                    throw SampleError.failed(value)
                 }
-                return .success(value)
+                return value
             },
             retry: .disabled
         )
 
         let observable = await MainActor.run {
-            client.makeQueryObservable(options)
+            client.useQuery(options)
         }
 
         let firstFailed = await waitUntilMainActor {
-            observable.isError && observable.error == .failed(1)
+            observable.isError && castSampleError(observable.error) == .failed(1)
         }
         #expect(firstFailed)
 
@@ -294,7 +426,12 @@ struct BetterQueryTests {
         }
         let result = await task.value
 
-        #expect(result == .success(2))
+        switch result {
+        case let .success(value):
+            #expect(value == 2)
+        default:
+            #expect(Bool(false))
+        }
 
         let recovered = await waitUntilMainActor {
             observable.isSuccess && observable.data == 2
@@ -306,22 +443,22 @@ struct BetterQueryTests {
         }
     }
 
-    @Test func queriesObservableCombineUsesTypedStates() async {
+    @Test func useQueriesCombineConsumesQueryResults() async {
         let client = QueryClient()
 
-        let left = QueryOptions<Int, SampleError>(
+        let left = QueryOptions<Int>(
             queryKey: [.string("combine"), .string("left")],
-            query: { _ in .success(1) }
+            queryFn: { _ in 1 }
         )
 
-        let right = QueryOptions<Int, SampleError>(
+        let right = QueryOptions<Int>(
             queryKey: [.string("combine"), .string("right")],
-            query: { _ in .success(2) }
+            queryFn: { _ in 2 }
         )
 
         let observable = await MainActor.run {
-            client.makeQueriesObservable([left, right]) { states in
-                states.compactMap(\.data).reduce(0, +)
+            client.useQueries([left, right]) { results in
+                results.compactMap(\.data).reduce(0, +)
             }
         }
 

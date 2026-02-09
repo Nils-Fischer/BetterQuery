@@ -1,6 +1,6 @@
 # BetterQuery vs TanStack Query Parity Matrix
 
-Last updated: 2026-02-08
+Last updated: 2026-02-09
 
 This matrix tracks practical behavior parity for the V1 Swift port.
 
@@ -37,7 +37,7 @@ This matrix tracks practical behavior parity for the V1 Swift port.
 | Multi-query combine observable | Matched | `QueriesObservable` supports combined outputs and memoized combine in core stream. |
 | Environment injection | Matched | SwiftUI environment key + `queryClient(_:)` modifier implemented. |
 | Environment replacement behavior | Matched | `EnvironmentValues.queryClient` replacement behavior is covered by tests. |
-| Observable factory ergonomics | Matched | `QueryClient.makeQueryObservable` and `makeQueriesObservable` implemented. |
+| Observable factory ergonomics | Matched | `QueryClient.useQuery` and `useQueries` are implemented. |
 | Observable lifecycle behavior | Matched | Start/refetch/stop and multi-observable combine updates are covered by tests. |
 
 ## Known partial/deferred areas

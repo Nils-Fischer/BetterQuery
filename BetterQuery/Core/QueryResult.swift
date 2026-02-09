@@ -1,14 +1,14 @@
 import Foundation
 
-public struct QueryState<Data: Sendable, Failure: Error & Sendable>: Sendable {
+public struct QueryResult<Data: Sendable>: @unchecked Sendable {
     public let status: QueryStatus
     public let fetchStatus: FetchStatus
     public let data: Data?
     public let dataUpdatedAt: Date?
-    public let error: Failure?
+    public let error: (any Error)?
     public let errorUpdatedAt: Date?
     public let failureCount: Int
-    public let failureReason: Failure?
+    public let failureReason: (any Error)?
     public let isPending: Bool
     public let isSuccess: Bool
     public let isError: Bool
@@ -21,17 +21,38 @@ public struct QueryState<Data: Sendable, Failure: Error & Sendable>: Sendable {
     public let isPaused: Bool
     public let isStale: Bool
     public let isEnabled: Bool
+
+    public var result: Result<Data, any Error>? {
+        switch status {
+        case .pending:
+            return nil
+        case .success:
+            guard let data else { return nil }
+            return .success(data)
+        case .error:
+            guard let error else { return nil }
+            return .failure(error)
+        }
+    }
 }
 
-public struct AnyQueryState: Sendable {
+public struct AnyQueryError: Error, @unchecked Sendable {
+    public let error: any Error
+
+    public init(_ error: any Error) {
+        self.error = error
+    }
+}
+
+public struct AnyQueryResult: Sendable {
     public let status: QueryStatus
     public let fetchStatus: FetchStatus
     public let data: AnySendableValue?
     public let dataUpdatedAt: Date?
-    public let error: AnySendableValue?
+    public let error: AnyQueryError?
     public let errorUpdatedAt: Date?
     public let failureCount: Int
-    public let failureReason: AnySendableValue?
+    public let failureReason: AnyQueryError?
     public let isPending: Bool
     public let isSuccess: Bool
     public let isError: Bool

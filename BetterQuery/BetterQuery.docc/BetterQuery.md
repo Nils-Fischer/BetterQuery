@@ -4,37 +4,37 @@ BetterQuery is a TanStack Query-inspired cache and observation library for Swift
 
 ## Overview
 
-BetterQuery uses a Result-first API with typed failures:
+BetterQuery uses a hook-first API with throwing query functions:
 
-- `QueryOptions<Data, Failure>` defines the query key, options, and `query` function.
-- `QueryClient.fetch` and `QueryClient.refetch` return `Result<Data, Failure>`.
-- `QueryClient.observe` emits `QueryState<Data, Failure>`.
-- SwiftUI wrappers (`QueryObservable`, `QueriesObservable`) expose typed errors directly.
+- `QueryOptions<Data>` defines the query key, options, and `queryFn`.
+- `QueryClient.fetchQuery` and `QueryClient.refetchQuery` are `async throws`.
+- `QueryClient.observeQuery` emits `QueryResult<Data>`.
+- SwiftUI wrappers (`QueryObservable`, `QueriesObservable`) expose loading/fetching/error state directly.
 
 ## Core Example
 
 ```swift
 import BetterQuery
 
-enum TodosError: Error, Sendable {
+enum TodosError: Error {
     case network
 }
 
 let client = QueryClient()
 
-let options = QueryOptions<[Todo], TodosError>(
+let options = QueryOptions<[Todo]>(
     queryKey: [.string("todos")],
-    query: { _ in
-        await api.fetchTodos()
+    queryFn: { _ in
+        try await api.fetchTodos()
     },
     retry: .maxAttempts(2),
     staleTime: .milliseconds(60_000)
 )
 
-let fetchResult = await client.fetch(options)
-let refetchResult = await client.refetch(options)
+let data = try await client.fetchQuery(options)
+let refreshed = try await client.refetchQuery(options)
 
-let stream = await client.observe(options)
+let stream = await client.observeQuery(options)
 for await state in stream {
     if state.isSuccess, let data = state.data {
         print("todos", data)
@@ -51,20 +51,20 @@ import Observation
 @MainActor
 @Observable
 final class TodosModel {
-    private let query: QueryObservable<[Todo], TodosError>
+    private let query: QueryObservable<[Todo]>
 
     init(client: QueryClient) {
-        query = client.makeQueryObservable(
-            QueryOptions<[Todo], TodosError>(
+        query = client.useQuery(
+            QueryOptions<[Todo]>(
                 queryKey: [.string("todos")],
-                query: { _ in await api.fetchTodos() }
+                queryFn: { _ in try await api.fetchTodos() }
             )
         )
     }
 
     var data: [Todo]? { query.data }
     var isLoading: Bool { query.isLoading }
-    var error: TodosError? { query.error }
+    var error: (any Error)? { query.error }
 
     func refetch() {
         _ = query.refetch()
@@ -82,6 +82,6 @@ final class TodosModel {
 ## See Also
 
 - ``QueryOptions``
-- ``QueryState``
+- ``QueryResult``
 - ``QueryObservable``
 - ``QueriesObservable``

@@ -118,10 +118,10 @@ public struct QueryClientOptions: Sendable {
     }
 }
 
-public struct QueryOptions<Data: Sendable, Failure: Error & Sendable>: Sendable {
+public struct QueryOptions<Data: Sendable>: Sendable {
     public let queryKey: QueryKey
     public var queryHash: String?
-    public var query: (@Sendable (QueryFunctionContext) async -> Result<Data, Failure>)?
+    public var queryFn: (@Sendable (QueryFunctionContext) async throws -> Data)?
     public var staleTime: StaleTime?
     public var gcTime: Int?
     public var retry: RetryOption?
@@ -138,7 +138,7 @@ public struct QueryOptions<Data: Sendable, Failure: Error & Sendable>: Sendable 
     public init(
         queryKey: QueryKey,
         queryHash: String? = nil,
-        query: (@Sendable (QueryFunctionContext) async -> Result<Data, Failure>)? = nil,
+        queryFn: (@Sendable (QueryFunctionContext) async throws -> Data)? = nil,
         staleTime: StaleTime? = nil,
         gcTime: Int? = nil,
         retry: RetryOption? = nil,
@@ -154,7 +154,7 @@ public struct QueryOptions<Data: Sendable, Failure: Error & Sendable>: Sendable 
     ) {
         self.queryKey = queryKey
         self.queryHash = queryHash
-        self.query = query
+        self.queryFn = queryFn
         self.staleTime = staleTime
         self.gcTime = gcTime
         self.retry = retry

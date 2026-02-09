@@ -3,19 +3,19 @@ import Observation
 
 @MainActor
 @Observable
-public final class QueriesObservable<Data: Sendable, Failure: Error & Sendable, Combined: Sendable> {
+public final class QueriesObservable<Data: Sendable, Combined: Sendable> {
     public private(set) var value: Combined?
     public private(set) var hasValue = false
 
     private let client: QueryClient
-    private let options: [QueryOptions<Data, Failure>]
-    private let combine: @Sendable ([QueryState<Data, Failure>]) -> Combined
+    private let options: [QueryOptions<Data>]
+    private let combine: @Sendable ([QueryResult<Data>]) -> Combined
     private var observationTask: Task<Void, Never>?
 
     public init(
         client: QueryClient,
-        options: [QueryOptions<Data, Failure>],
-        combine: @escaping @Sendable ([QueryState<Data, Failure>]) -> Combined
+        options: [QueryOptions<Data>],
+        combine: @escaping @Sendable ([QueryResult<Data>]) -> Combined
     ) {
         self.client = client
         self.options = options
@@ -45,12 +45,17 @@ public final class QueriesObservable<Data: Sendable, Failure: Error & Sendable, 
     }
 
     @discardableResult
-    public func refetchAll(cancelRefetch: Bool = true) -> Task<[Result<Data, Failure>], Never> {
+    public func refetchAll(cancelRefetch: Bool = true) -> Task<[Result<Data, any Error>], Never> {
         let task = Task { [options, client] in
-            var results: [Result<Data, Failure>] = []
+            var results: [Result<Data, any Error>] = []
             results.reserveCapacity(options.count)
             for option in options {
-                results.append(await client.refetch(option, cancelRefetch: cancelRefetch))
+                do {
+                    let value = try await client.refetchQuery(option, cancelRefetch: cancelRefetch)
+                    results.append(Result<Data, any Error>.success(value))
+                } catch {
+                    results.append(Result<Data, any Error>.failure(error))
+                }
             }
             return results
         }

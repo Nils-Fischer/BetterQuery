@@ -8,7 +8,7 @@ Add BetterQuery via Swift Package Manager:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/Nils-Fischer/BetterQuery.git", from: "0.1.0")
+    .package(url: "https://github.com/Nils-Fischer/BetterQuery.git", from: "0.3.0")
 ]
 ```
 
@@ -38,11 +38,7 @@ struct DemoApp: App {
 
 struct ContentView: View {
     @Environment(\.queryClient) private var client
-    enum QueryFailure: Error, Sendable {
-        case network
-    }
-
-    @State private var query: QueryObservable<String, QueryFailure>?
+    @State private var query: QueryObservable<String>?
 
     var body: some View {
         Group {
@@ -63,10 +59,10 @@ struct ContentView: View {
         }
         .task {
             if query == nil {
-                query = client.makeQueryObservable(
-                    QueryOptions<String, QueryFailure>(
+                query = client.useQuery(
+                    QueryOptions<String>(
                         queryKey: [.string("hello")],
-                        query: { _ in .success("Hello BetterQuery") },
+                        queryFn: { _ in "Hello BetterQuery" },
                         retry: .maxAttempts(2),
                         staleTime: .milliseconds(24 * 60 * 60 * 1000)
                     )
@@ -83,10 +79,10 @@ struct ContentView: View {
 ## Equivalent to `useQuery`
 
 ```swift
-let q = client.makeQueryObservable(
-    QueryOptions<Content, ContentResolverError>(
+let q = client.useQuery(
+    QueryOptions<Content>(
         queryKey: [.string("enrichedContent"), .string(sharedContent.url)],
-        query: { _ in await resolveContent(sharedContent.url) },
+        queryFn: { _ in try await resolveContent(sharedContent.url) },
         retry: .maxAttempts(2),
         staleTime: .milliseconds(24 * 60 * 60 * 1000)
     )
@@ -98,6 +94,13 @@ let isError = q.isError
 let error = q.error
 _ = q.refetch()
 ```
+
+## Core API
+
+- `fetchQuery(_:)` / `refetchQuery(_:cancelRefetch:)` for imperative loads
+- `observeQuery(_:)` for state streaming
+- `invalidateQueries` / `refetchQueries` for cache orchestration
+- `getQueryData` / `setQueryData` for cache access
 
 ## Highlights
 

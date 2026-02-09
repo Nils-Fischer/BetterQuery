@@ -1,6 +1,6 @@
 # BetterQuery Swift Port Plan (TanStack Query-Inspired)
 
-Last updated: 2026-02-07 (progress checkpoint)
+Last updated: 2026-02-09 (progress checkpoint)
 
 ## Goal
 
@@ -307,30 +307,34 @@ This document is the canonical implementation roadmap.
 
 When architecture, defaults, API surface, or phase status changes, update this document in the same change set.
 
-## Breaking API Update: Result-First Typed Failures (2026-02-08)
+## Breaking API Update: Hook-First Simplification (2026-02-09)
 
 ### Implemented contract
 
-- Replaced throw-based query function with Result-first typed query options:
-  - `QueryOptions<Data, Failure>` with `query: @Sendable (QueryFunctionContext) async -> Result<Data, Failure>`.
-- Replaced `QueryResult` with typed `QueryState<Data, Failure>`.
-- Replaced query entrypoints:
-  - `observe(_:) -> AsyncStream<QueryState<Data, Failure>>`
-  - `fetch(_:) async -> Result<Data, Failure>`
-  - `refetch(_:, cancelRefetch:) async -> Result<Data, Failure>`
-- SwiftUI wrappers are typed on failure:
-  - `QueryObservable<Data, Failure>`
-  - `QueriesObservable<Data, Failure, Combined>`
-- Removed public throw-based query API surface and `QueryError` wrapper.
+- Query options are now throwing and single-generic:
+  - `QueryOptions<Data>` with `queryFn: @Sendable (QueryFunctionContext) async throws -> Data`.
+- `QueryState<Data, Failure>` has been replaced by `QueryResult<Data>` with erased errors.
+- `QueryResult<Data>` now includes `result: Result<Data, any Error>?` for terminal-state convenience.
+- Primary client entrypoints are now:
+  - `fetchQuery(_:) async throws -> Data`
+  - `prefetchQuery(_:) async`
+  - `refetchQuery(_:cancelRefetch:) async throws -> Data`
+  - `observeQuery(_:) -> AsyncStream<QueryResult<Data>>`
+- SwiftUI wrappers are now:
+  - `QueryObservable<Data>`
+  - `QueriesObservable<Data, Combined>`
+- Observable factories are now:
+  - `useQuery(_:)`
+  - `useQueries(_:combine:)`
 
 ### Runtime invariants
 
-- A query hash is bound to one `(Data, Failure)` pair.
-- Reusing the same query hash with a different data or failure type is treated as a programmer contract violation (deterministic precondition failure).
+- A query hash is bound to one `Data` type.
+- Reusing a query hash with a different data type is treated as a programmer contract violation (deterministic precondition failure).
 
 ### Default behavior parity retained
 
-- Imperative `fetch` keeps retry disabled by default.
+- Imperative `fetchQuery` keeps retry disabled by default.
 - Observer-driven fetches keep default retry attempts at `3`.
 - Retry delay default remains exponential backoff capped at `30s`.
 - Retry delay resolver remains zero-based by failure count.
@@ -338,8 +342,9 @@ When architecture, defaults, API surface, or phase status changes, update this d
 
 ### Migration checklist
 
-- [x] Core API migrated to Result-first typed failures.
-- [x] SwiftUI observable layer migrated to typed failures.
+- [x] Core API migrated to throwing `queryFn`.
+- [x] Observable API migrated to `QueryResult<Data>` and erased errors.
+- [x] Client API renamed to `fetchQuery` / `refetchQuery` / `observeQuery`.
+- [x] SwiftUI factory API renamed to `useQuery` / `useQueries`.
 - [x] Core test suite migrated and passing.
-- [x] README and DocC examples migrated.
-- [ ] Downstream consumers migrated (LocatrCore in progress).
+- [ ] Downstream consumers migrated (LocatrCore pending).

@@ -3,11 +3,11 @@ import Observation
 
 @MainActor
 @Observable
-public final class QueryObservable<Data: Sendable, Failure: Error & Sendable> {
+public final class QueryObservable<Data: Sendable> {
     public private(set) var status: QueryStatus = .pending
     public private(set) var fetchStatus: FetchStatus = .idle
     public private(set) var data: Data?
-    public private(set) var error: Failure?
+    public private(set) var error: (any Error)?
     public private(set) var isPending = true
     public private(set) var isSuccess = false
     public private(set) var isError = false
@@ -18,10 +18,10 @@ public final class QueryObservable<Data: Sendable, Failure: Error & Sendable> {
     public private(set) var isEnabled = true
 
     private let client: QueryClient
-    private let options: QueryOptions<Data, Failure>
+    private let options: QueryOptions<Data>
     private var observationTask: Task<Void, Never>?
 
-    public init(client: QueryClient, options: QueryOptions<Data, Failure>) {
+    public init(client: QueryClient, options: QueryOptions<Data>) {
         self.client = client
         self.options = options
         start()
@@ -35,7 +35,7 @@ public final class QueryObservable<Data: Sendable, Failure: Error & Sendable> {
         observationTask?.cancel()
         observationTask = Task { [weak self] in
             guard let self else { return }
-            let stream = await client.observe(options)
+            let stream = await client.observeQuery(options)
             for await state in stream {
                 self.apply(state)
             }
@@ -48,14 +48,19 @@ public final class QueryObservable<Data: Sendable, Failure: Error & Sendable> {
     }
 
     @discardableResult
-    public func refetch(cancelRefetch: Bool = true) -> Task<Result<Data, Failure>, Never> {
+    public func refetch(cancelRefetch: Bool = true) -> Task<Result<Data, any Error>, Never> {
         let task = Task { [options, client] in
-            await client.refetch(options, cancelRefetch: cancelRefetch)
+            do {
+                let value = try await client.refetchQuery(options, cancelRefetch: cancelRefetch)
+                return Result<Data, any Error>.success(value)
+            } catch {
+                return Result<Data, any Error>.failure(error)
+            }
         }
         return task
     }
 
-    private func apply(_ state: QueryState<Data, Failure>) {
+    private func apply(_ state: QueryResult<Data>) {
         status = state.status
         fetchStatus = state.fetchStatus
         data = state.data
