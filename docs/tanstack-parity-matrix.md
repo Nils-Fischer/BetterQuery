@@ -20,7 +20,7 @@ This matrix tracks practical behavior parity for the V1 Swift port.
 | Invalidation semantics | Matched | Invalidation marks stale immediately and supports refetch-type targeting. |
 | Inactive stale filter behavior | Matched | Inactive queries are stale only when invalidated or missing data. |
 | `enabled` gating | Matched | Disabled queries do not auto-fetch but can be refetched manually. |
-| `fetchQuery` retry default | Matched | Retry disabled by default for imperative fetches. |
+| `fetch` retry default | Matched | Retry disabled by default for imperative fetches. |
 | Observer retry default | Matched | Default retry attempts align with TanStack (`3`). |
 | Retry delay progression | Matched | Exponential backoff uses zero-based failure count (`1000 * 2^n`, capped at `30000`). |
 | In-flight dedupe/cancel refetch | Matched | `cancelRefetch: false` reuses in-flight fetch; `true` cancels and restarts. |

@@ -12,7 +12,7 @@ private struct QueryResultFingerprint: Equatable, Sendable {
     let hasError: Bool
     let isPaused: Bool
 
-    init<Data: Sendable>(_ result: QueryResult<Data>) {
+    init<Data: Sendable, Failure: Error & Sendable>(_ result: QueryState<Data, Failure>) {
         status = result.status
         fetchStatus = result.fetchStatus
         dataUpdatedAt = result.dataUpdatedAt
@@ -26,16 +26,16 @@ private struct QueryResultFingerprint: Equatable, Sendable {
     }
 }
 
-private actor CombinedResultsStore<Data: Sendable, Combined: Sendable> {
-    private var latest: [QueryResult<Data>?]
+private actor CombinedResultsStore<Data: Sendable, Failure: Error & Sendable, Combined: Sendable> {
+    private var latest: [QueryState<Data, Failure>?]
     private var fingerprints: [QueryResultFingerprint?]
-    private let combine: @Sendable ([QueryResult<Data>]) -> Combined
+    private let combine: @Sendable ([QueryState<Data, Failure>]) -> Combined
     private let continuation: AsyncStream<Combined>.Continuation
 
     init(
         count: Int,
         continuation: AsyncStream<Combined>.Continuation,
-        combine: @escaping @Sendable ([QueryResult<Data>]) -> Combined
+        combine: @escaping @Sendable ([QueryState<Data, Failure>]) -> Combined
     ) {
         self.latest = Array(repeating: nil, count: count)
         self.fingerprints = Array(repeating: nil, count: count)
@@ -43,7 +43,7 @@ private actor CombinedResultsStore<Data: Sendable, Combined: Sendable> {
         self.combine = combine
     }
 
-    func update(index: Int, result: QueryResult<Data>) {
+    func update(index: Int, result: QueryState<Data, Failure>) {
         let nextFingerprint = QueryResultFingerprint(result)
         if fingerprints[index] == nextFingerprint {
             return
@@ -60,15 +60,15 @@ private actor CombinedResultsStore<Data: Sendable, Combined: Sendable> {
 }
 
 extension QueryClient {
-    public func observeQueries<Data: Sendable>(
-        _ options: [QueryOptions<Data>]
-    ) -> AsyncStream<[QueryResult<Data>]> {
+    public func observeQueries<Data: Sendable, Failure: Error & Sendable>(
+        _ options: [QueryOptions<Data, Failure>]
+    ) -> AsyncStream<[QueryState<Data, Failure>]> {
         observeQueries(options, combine: { $0 })
     }
 
-    public func observeQueries<Data: Sendable, Combined: Sendable>(
-        _ options: [QueryOptions<Data>],
-        combine: @escaping @Sendable ([QueryResult<Data>]) -> Combined
+    public func observeQueries<Data: Sendable, Failure: Error & Sendable, Combined: Sendable>(
+        _ options: [QueryOptions<Data, Failure>],
+        combine: @escaping @Sendable ([QueryState<Data, Failure>]) -> Combined
     ) -> AsyncStream<Combined> {
         if options.isEmpty {
             return AsyncStream { continuation in
@@ -79,7 +79,7 @@ extension QueryClient {
 
         let client = self
         return AsyncStream { continuation in
-            let store = CombinedResultsStore<Data, Combined>(
+            let store = CombinedResultsStore<Data, Failure, Combined>(
                 count: options.count,
                 continuation: continuation,
                 combine: combine
@@ -90,7 +90,7 @@ extension QueryClient {
 
             for (index, option) in options.enumerated() {
                 let task = Task {
-                    let stream = await client.observeQuery(option)
+                    let stream = await client.observe(option)
                     for await result in stream {
                         await store.update(index: index, result: result)
                     }

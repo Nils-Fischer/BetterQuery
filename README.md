@@ -38,7 +38,11 @@ struct DemoApp: App {
 
 struct ContentView: View {
     @Environment(\.queryClient) private var client
-    @State private var query: QueryObservable<String>?
+    enum QueryFailure: Error, Sendable {
+        case network
+    }
+
+    @State private var query: QueryObservable<String, QueryFailure>?
 
     var body: some View {
         Group {
@@ -60,9 +64,9 @@ struct ContentView: View {
         .task {
             if query == nil {
                 query = client.makeQueryObservable(
-                    QueryOptions(
+                    QueryOptions<String, QueryFailure>(
                         queryKey: [.string("hello")],
-                        queryFn: { _ in "Hello BetterQuery" },
+                        query: { _ in .success("Hello BetterQuery") },
                         retry: .maxAttempts(2),
                         staleTime: .milliseconds(24 * 60 * 60 * 1000)
                     )
@@ -80,9 +84,9 @@ struct ContentView: View {
 
 ```swift
 let q = client.makeQueryObservable(
-    QueryOptions(
+    QueryOptions<Content, ContentResolverError>(
         queryKey: [.string("enrichedContent"), .string(sharedContent.url)],
-        queryFn: { _ in try await resolveContent(sharedContent.url) },
+        query: { _ in await resolveContent(sharedContent.url) },
         retry: .maxAttempts(2),
         staleTime: .milliseconds(24 * 60 * 60 * 1000)
     )

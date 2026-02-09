@@ -1,8 +1,20 @@
 import Foundation
 
-public enum QueryClientError: Error, Sendable {
+public enum QueryClientInfrastructureError: Error, Sendable {
     case missingQueryFunction(queryHash: String)
     case typeMismatch(queryHash: String)
+    case cancelled
+    case queryFailure(queryHash: String)
+}
+
+private enum QueryExecutionResult: Sendable {
+    case success(AnySendableValue)
+    case failure(AnySendableValue)
+}
+
+private enum FetchTaskOutput: Sendable {
+    case success(AnySendableValue)
+    case failure(AnySendableValue)
     case cancelled
 }
 
@@ -16,7 +28,9 @@ public actor QueryClient {
     private struct AnyQueryOptions: Sendable {
         var queryKey: QueryKey
         var queryHash: String
-        var queryFn: (@Sendable (QueryFunctionContext) async throws -> AnySendableValue)?
+        var dataType: ObjectIdentifier
+        var failureType: ObjectIdentifier
+        var query: (@Sendable (QueryFunctionContext) async -> QueryExecutionResult)?
         var staleTime: StaleTime
         var gcTime: Int?
         var retry: RetryOption?
@@ -34,18 +48,20 @@ public actor QueryClient {
     private struct QueryRecord: Sendable {
         var queryKey: QueryKey
         var queryHash: String
+        var dataType: ObjectIdentifier
+        var failureType: ObjectIdentifier
         var options: AnyQueryOptions
 
         var data: AnySendableValue?
         var dataUpdateCount: Int
         var dataUpdatedAt: Date?
 
-        var error: QueryError?
+        var error: AnySendableValue?
         var errorUpdateCount: Int
         var errorUpdatedAt: Date?
 
         var fetchFailureCount: Int
-        var fetchFailureReason: QueryError?
+        var fetchFailureReason: AnySendableValue?
         var isInvalidated: Bool
         var status: QueryStatus
         var fetchStatus: FetchStatus
@@ -53,14 +69,14 @@ public actor QueryClient {
         var observers: Set<UUID>
         var gcTime: Int
         var gcTask: Task<Void, Never>?
-        var fetchTask: Task<AnySendableValue, Error>?
+        var fetchTask: Task<FetchTaskOutput, Never>?
     }
 
     private struct ObserverRecord: Sendable {
         let id: UUID
         let queryHash: String
         let options: AnyQueryOptions
-        let emit: @Sendable (AnyQueryResult) -> Void
+        let emit: @Sendable (AnyQueryState) -> Void
     }
 
     private let defaultGcTimeMs = 5 * 60 * 1000
@@ -126,7 +142,7 @@ public actor QueryClient {
     }
 
     public func isFetching(_ filters: QueryFilters = .all) -> Int {
-        return matchingQueryHashes(filters: QueryFilters(
+        matchingQueryHashes(filters: QueryFilters(
             queryKey: filters.queryKey,
             exact: filters.exact,
             type: filters.type,
@@ -135,7 +151,9 @@ public actor QueryClient {
         )).count
     }
 
-    public func fetchQuery<Data: Sendable>(_ options: QueryOptions<Data>) async throws -> Data {
+    public func fetch<Data: Sendable, Failure: Error & Sendable>(
+        _ options: QueryOptions<Data, Failure>
+    ) async -> Result<Data, Failure> {
         var defaultedOptions = defaultQueryOptions(options)
         if defaultedOptions.retry == nil {
             defaultedOptions.retry = .disabled
@@ -144,30 +162,24 @@ public actor QueryClient {
         let query = ensureQuery(defaultedOptions)
         if !isStaleByTime(record: query, staleTime: defaultedOptions.staleTime),
            let cached: Data = query.data?.decode(Data.self) {
-            return cached
+            return .success(cached)
         }
 
-        let value = try await fetch(queryHash: defaultedOptions.queryHash, options: defaultedOptions, cancelRefetch: true)
-        guard let typed = value.decode(Data.self) else {
-            throw QueryClientError.typeMismatch(queryHash: defaultedOptions.queryHash)
-        }
-        return typed
+        let output = await fetchOutput(queryHash: defaultedOptions.queryHash, options: defaultedOptions, cancelRefetch: true)
+        return decodeOutput(output, asData: Data.self, asFailure: Failure.self, queryHash: defaultedOptions.queryHash)
     }
 
-    public func prefetchQuery<Data: Sendable>(_ options: QueryOptions<Data>) async {
-        _ = try? await fetchQuery(options)
+    public func prefetch<Data: Sendable, Failure: Error & Sendable>(_ options: QueryOptions<Data, Failure>) async {
+        _ = await fetch(options)
     }
 
-    public func refetchQuery<Data: Sendable>(
-        _ options: QueryOptions<Data>,
+    public func refetch<Data: Sendable, Failure: Error & Sendable>(
+        _ options: QueryOptions<Data, Failure>,
         cancelRefetch: Bool = true
-    ) async throws -> Data {
+    ) async -> Result<Data, Failure> {
         let defaultedOptions = defaultQueryOptions(options)
-        let value = try await fetch(queryHash: defaultedOptions.queryHash, options: defaultedOptions, cancelRefetch: cancelRefetch)
-        guard let typed = value.decode(Data.self) else {
-            throw QueryClientError.typeMismatch(queryHash: defaultedOptions.queryHash)
-        }
-        return typed
+        let output = await fetchOutput(queryHash: defaultedOptions.queryHash, options: defaultedOptions, cancelRefetch: cancelRefetch)
+        return decodeOutput(output, asData: Data.self, asFailure: Failure.self, queryHash: defaultedOptions.queryHash)
     }
 
     public func getQueryData<Data>(queryKey: QueryKey, as: Data.Type = Data.self) -> Data? {
@@ -182,9 +194,17 @@ public actor QueryClient {
         }
 
         let queryHash = hashKey(queryKey)
-        var defaultedOptions = defaultQueryOptions(QueryOptions<Data>(queryKey: queryKey))
-        if let existing = queries[queryHash]?.options.queryFn {
-            defaultedOptions.queryFn = existing
+        let existingDataType = queries[queryHash]?.dataType
+        if let existingDataType {
+            precondition(
+                existingDataType == ObjectIdentifier(Data.self),
+                "Query key \(queryHash) already exists with a different Data type"
+            )
+        }
+
+        var defaultedOptions = defaultQueryOptions(QueryOptions<Data, QueryClientInfrastructureError>(queryKey: queryKey))
+        if let existing = queries[queryHash]?.options.query {
+            defaultedOptions.query = existing
         }
 
         var record = ensureQuery(defaultedOptions)
@@ -264,37 +284,38 @@ public actor QueryClient {
                 continue
             }
 
-            if record.options.queryFn == nil {
+            if record.options.query == nil {
                 for observerID in record.observers {
-                    if let observerFn = observers[observerID]?.options.queryFn {
-                        record.options.queryFn = observerFn
+                    if let observerQuery = observers[observerID]?.options.query {
+                        record.options.query = observerQuery
                         break
                     }
                 }
                 queries[hash] = record
             }
 
-            do {
-                _ = try await fetch(
-                    queryHash: hash,
-                    options: record.options,
-                    cancelRefetch: options.cancelRefetch
-                )
-            } catch {
-                if options.throwOnError {
-                    throw error
+            let output = await fetchOutput(
+                queryHash: hash,
+                options: record.options,
+                cancelRefetch: options.cancelRefetch
+            )
+            if options.throwOnError {
+                if case .failure = output {
+                    throw QueryClientInfrastructureError.queryFailure(queryHash: hash)
                 }
             }
         }
     }
 
-    public func observeQuery<Data: Sendable>(_ options: QueryOptions<Data>) -> AsyncStream<QueryResult<Data>> {
+    public func observe<Data: Sendable, Failure: Error & Sendable>(
+        _ options: QueryOptions<Data, Failure>
+    ) -> AsyncStream<QueryState<Data, Failure>> {
         let defaulted = defaultQueryOptions(options)
         let observerID = UUID()
 
         return AsyncStream { continuation in
-            let emit: @Sendable (AnyQueryResult) -> Void = { anyResult in
-                continuation.yield(Self.castResult(anyResult, as: Data.self))
+            let emit: @Sendable (AnyQueryState) -> Void = { anyState in
+                continuation.yield(Self.castState(anyState, asData: Data.self, asFailure: Failure.self, queryHash: defaulted.queryHash))
             }
 
             Task {
@@ -309,39 +330,88 @@ public actor QueryClient {
         }
     }
 
-    public func getQueryResult<Data: Sendable>(_ options: QueryOptions<Data>) -> QueryResult<Data> {
+    public func getQueryState<Data: Sendable, Failure: Error & Sendable>(
+        _ options: QueryOptions<Data, Failure>
+    ) -> QueryState<Data, Failure> {
         let defaulted = defaultQueryOptions(options)
         let record = ensureQuery(defaulted)
-        let anyResult = makeAnyResult(record: record, options: defaulted)
-        return Self.castResult(anyResult, as: Data.self)
+        let anyState = makeAnyState(record: record, options: defaulted)
+        return Self.castState(anyState, asData: Data.self, asFailure: Failure.self, queryHash: defaulted.queryHash)
     }
 
-    private static func castResult<Data: Sendable>(_ anyResult: AnyQueryResult, as: Data.Type) -> QueryResult<Data> {
-        QueryResult<Data>(
-            status: anyResult.status,
-            fetchStatus: anyResult.fetchStatus,
-            data: anyResult.data?.decode(Data.self),
-            dataUpdatedAt: anyResult.dataUpdatedAt,
-            error: anyResult.error,
-            errorUpdatedAt: anyResult.errorUpdatedAt,
-            failureCount: anyResult.failureCount,
-            failureReason: anyResult.failureReason,
-            isPending: anyResult.isPending,
-            isSuccess: anyResult.isSuccess,
-            isError: anyResult.isError,
-            isInitialLoading: anyResult.isInitialLoading,
-            isLoading: anyResult.isLoading,
-            isFetching: anyResult.isFetching,
-            isRefetching: anyResult.isRefetching,
-            isLoadingError: anyResult.isLoadingError,
-            isRefetchError: anyResult.isRefetchError,
-            isPaused: anyResult.isPaused,
-            isStale: anyResult.isStale,
-            isEnabled: anyResult.isEnabled
+    private func decodeOutput<Data: Sendable, Failure: Error & Sendable>(
+        _ output: FetchTaskOutput,
+        asData: Data.Type,
+        asFailure: Failure.Type,
+        queryHash: String
+    ) -> Result<Data, Failure> {
+        switch output {
+        case let .success(value):
+            guard let typed = value.decode(Data.self) else {
+                preconditionFailure("Query data type mismatch for hash \(queryHash)")
+            }
+            return .success(typed)
+        case let .failure(value):
+            guard let typed = value.decode(Failure.self) else {
+                preconditionFailure("Query failure type mismatch for hash \(queryHash)")
+            }
+            return .failure(typed)
+        case .cancelled:
+            preconditionFailure("Fetch for query \(queryHash) was cancelled without cached data")
+        }
+    }
+
+    private static func castState<Data: Sendable, Failure: Error & Sendable>(
+        _ anyState: AnyQueryState,
+        asData: Data.Type,
+        asFailure: Failure.Type,
+        queryHash: String
+    ) -> QueryState<Data, Failure> {
+        let typedError: Failure?
+        if let error = anyState.error {
+            guard let cast = error.decode(Failure.self) else {
+                preconditionFailure("Query failure type mismatch for hash \(queryHash)")
+            }
+            typedError = cast
+        } else {
+            typedError = nil
+        }
+
+        let typedFailureReason: Failure?
+        if let reason = anyState.failureReason {
+            guard let cast = reason.decode(Failure.self) else {
+                preconditionFailure("Query failure type mismatch for hash \(queryHash)")
+            }
+            typedFailureReason = cast
+        } else {
+            typedFailureReason = nil
+        }
+
+        return QueryState<Data, Failure>(
+            status: anyState.status,
+            fetchStatus: anyState.fetchStatus,
+            data: anyState.data?.decode(Data.self),
+            dataUpdatedAt: anyState.dataUpdatedAt,
+            error: typedError,
+            errorUpdatedAt: anyState.errorUpdatedAt,
+            failureCount: anyState.failureCount,
+            failureReason: typedFailureReason,
+            isPending: anyState.isPending,
+            isSuccess: anyState.isSuccess,
+            isError: anyState.isError,
+            isInitialLoading: anyState.isInitialLoading,
+            isLoading: anyState.isLoading,
+            isFetching: anyState.isFetching,
+            isRefetching: anyState.isRefetching,
+            isLoadingError: anyState.isLoadingError,
+            isRefetchError: anyState.isRefetchError,
+            isPaused: anyState.isPaused,
+            isStale: anyState.isStale,
+            isEnabled: anyState.isEnabled
         )
     }
 
-    private func addObserver(id: UUID, options: AnyQueryOptions, emit: @escaping @Sendable (AnyQueryResult) -> Void) {
+    private func addObserver(id: UUID, options: AnyQueryOptions, emit: @escaping @Sendable (AnyQueryState) -> Void) {
         var record = ensureQuery(options)
         record.observers.insert(id)
         record.gcTask?.cancel()
@@ -349,11 +419,11 @@ public actor QueryClient {
         queries[record.queryHash] = record
 
         observers[id] = ObserverRecord(id: id, queryHash: record.queryHash, options: options, emit: emit)
-        emit(makeAnyResult(record: record, options: options))
+        emit(makeAnyState(record: record, options: options))
 
         if shouldFetchOnMount(record: record, options: options) {
             Task {
-                _ = try? await self.fetch(queryHash: record.queryHash, options: options, cancelRefetch: true)
+                _ = await self.fetchOutput(queryHash: record.queryHash, options: options, cancelRefetch: true)
             }
         }
     }
@@ -374,7 +444,9 @@ public actor QueryClient {
         }
     }
 
-    private func defaultQueryOptions<Data: Sendable>(_ options: QueryOptions<Data>) -> AnyQueryOptions {
+    private func defaultQueryOptions<Data: Sendable, Failure: Error & Sendable>(
+        _ options: QueryOptions<Data, Failure>
+    ) -> AnyQueryOptions {
         var mergedDefaults = defaultOptions
         mergedDefaults.merge(getQueryDefaults(queryKey: options.queryKey))
 
@@ -398,20 +470,27 @@ public actor QueryClient {
         let networkMode = mergedDefaults.networkMode
         let refetchOnReconnect = mergedDefaults.refetchOnReconnect ?? (networkMode == .always ? .never : .stale)
 
-        let wrappedQueryFn: (@Sendable (QueryFunctionContext) async throws -> AnySendableValue)?
-        if let queryFn = options.queryFn {
-            wrappedQueryFn = { context in
-                let value = try await queryFn(context)
-                return AnySendableValue(value)
+        let wrappedQuery: (@Sendable (QueryFunctionContext) async -> QueryExecutionResult)?
+        if let query = options.query {
+            wrappedQuery = { context in
+                let result = await query(context)
+                switch result {
+                case let .success(value):
+                    return .success(AnySendableValue(value))
+                case let .failure(error):
+                    return .failure(AnySendableValue(error))
+                }
             }
         } else {
-            wrappedQueryFn = nil
+            wrappedQuery = nil
         }
 
         return AnyQueryOptions(
             queryKey: options.queryKey,
             queryHash: options.queryHash ?? hashKey(options.queryKey),
-            queryFn: wrappedQueryFn,
+            dataType: ObjectIdentifier(Data.self),
+            failureType: ObjectIdentifier(Failure.self),
+            query: wrappedQuery,
             staleTime: mergedDefaults.staleTime ?? .milliseconds(0),
             gcTime: mergedDefaults.gcTime,
             retry: mergedDefaults.retry,
@@ -430,6 +509,8 @@ public actor QueryClient {
     private func ensureQuery(_ options: AnyQueryOptions) -> QueryRecord {
         let hash = options.queryHash
         if var existing = queries[hash] {
+            precondition(existing.dataType == options.dataType, "Query hash \(hash) is already bound to a different Data type")
+            precondition(existing.failureType == options.failureType, "Query hash \(hash) is already bound to a different Failure type")
             existing.options = mergeQueryOptions(existing.options, options)
             existing.gcTime = max(existing.gcTime, options.gcTime ?? defaultGcTimeMs)
             queries[hash] = existing
@@ -439,6 +520,8 @@ public actor QueryClient {
         let record = QueryRecord(
             queryKey: options.queryKey,
             queryHash: hash,
+            dataType: options.dataType,
+            failureType: options.failureType,
             options: options,
             data: nil,
             dataUpdateCount: 0,
@@ -465,7 +548,9 @@ public actor QueryClient {
         AnyQueryOptions(
             queryKey: new.queryKey,
             queryHash: new.queryHash,
-            queryFn: new.queryFn ?? old.queryFn,
+            dataType: new.dataType,
+            failureType: new.failureType,
+            query: new.query ?? old.query,
             staleTime: new.staleTime,
             gcTime: new.gcTime ?? old.gcTime,
             retry: new.retry ?? old.retry,
@@ -481,11 +566,11 @@ public actor QueryClient {
         )
     }
 
-    private func fetch(
+    private func fetchOutput(
         queryHash: String,
         options: AnyQueryOptions,
         cancelRefetch: Bool
-    ) async throws -> AnySendableValue {
+    ) async -> FetchTaskOutput {
         var record = ensureQuery(options)
         record.options = mergeQueryOptions(record.options, options)
 
@@ -496,22 +581,22 @@ public actor QueryClient {
                 queries[queryHash] = record
             } else {
                 queries[queryHash] = record
-                return try await inFlight.value
+                return await inFlight.value
             }
         }
 
-        if record.options.queryFn == nil {
+        if record.options.query == nil {
             for observerID in record.observers {
-                if let observerFn = observers[observerID]?.options.queryFn {
-                    record.options.queryFn = observerFn
+                if let observerQuery = observers[observerID]?.options.query {
+                    record.options.query = observerQuery
                     break
                 }
             }
         }
         queries[queryHash] = record
 
-        guard let queryFn = record.options.queryFn else {
-            throw QueryClientError.missingQueryFunction(queryHash: queryHash)
+        guard let query = record.options.query else {
+            preconditionFailure("Missing query function for hash \(queryHash)")
         }
 
         record.fetchFailureCount = 0
@@ -524,7 +609,7 @@ public actor QueryClient {
         queries[queryHash] = record
         notifyObservers(for: queryHash)
 
-        let task = Task<AnySendableValue, Error> {
+        let task = Task<FetchTaskOutput, Never> {
             let cancellationToken = QueryCancellationToken()
             let context = QueryFunctionContext(
                 queryKey: options.queryKey,
@@ -533,68 +618,61 @@ public actor QueryClient {
             )
             var failureCount = 0
 
-            do {
-                while true {
-                    try Task.checkCancellation()
+            while true {
+                if Task.isCancelled {
+                    cancellationToken.cancel()
+                    return .cancelled
+                }
 
-                    if !self.canFetch(options.networkMode) {
+                if !self.canFetch(options.networkMode) {
+                    self.setFetchStatus(.paused, for: queryHash)
+                    await self.waitUntilCanFetch(options.networkMode)
+                    self.setFetchStatus(.fetching, for: queryHash)
+                }
+
+                let result = await withTaskCancellationHandler {
+                    await query(context)
+                } onCancel: {
+                    cancellationToken.cancel()
+                }
+
+                switch result {
+                case let .success(value):
+                    return .success(value)
+                case let .failure(errorValue):
+                    let error = self.errorForRetry(errorValue)
+                    let retry = options.retry ?? .maxAttempts(3)
+                    let retryDelay = options.retryDelay ?? .resolver { attempt, _ in
+                        min(1000 * Int(pow(2, Double(attempt))), 30000)
+                    }
+                    let delayMs = self.resolveDelay(retryDelay, failureCount: failureCount, error: error)
+                    let shouldRetry = retry.shouldRetry(failureCount: failureCount, error: error)
+                    if !shouldRetry {
+                        return .failure(errorValue)
+                    }
+
+                    failureCount += 1
+                    self.setFetchFailure(count: failureCount, error: errorValue, for: queryHash)
+
+                    if delayMs > 0 {
+                        do {
+                            try await Task.sleep(nanoseconds: UInt64(delayMs) * 1_000_000)
+                        } catch {
+                            cancellationToken.cancel()
+                            return .cancelled
+                        }
+                    }
+                    if Task.isCancelled {
+                        cancellationToken.cancel()
+                        return .cancelled
+                    }
+
+                    if !self.canContinue(options.networkMode) {
                         self.setFetchStatus(.paused, for: queryHash)
-                        await self.waitUntilCanFetch(options.networkMode)
+                        await self.waitUntilCanContinue(options.networkMode)
                         self.setFetchStatus(.fetching, for: queryHash)
                     }
-
-                    do {
-                        let value = try await withTaskCancellationHandler {
-                            try await queryFn(context)
-                        } onCancel: {
-                            cancellationToken.cancel()
-                        }
-                        return value
-                    } catch is CancellationError {
-                        cancellationToken.cancel()
-                        throw QueryClientError.cancelled
-                    } catch {
-                        if let queryError = error as? QueryClientError, case .cancelled = queryError {
-                            cancellationToken.cancel()
-                            throw queryError
-                        }
-
-                        let retry = options.retry ?? .maxAttempts(3)
-                        let retryDelay = options.retryDelay ?? .resolver { attempt, _ in
-                            min(1000 * Int(pow(2, Double(attempt))), 30000)
-                        }
-                        // TanStack parity: delay resolver receives the current (zero-based) failure count.
-                        let delayMs = resolveDelay(retryDelay, failureCount: failureCount, error: error)
-                        let shouldRetry = retry.shouldRetry(failureCount: failureCount, error: error)
-                        if !shouldRetry {
-                            throw error
-                        }
-
-                        failureCount += 1
-                        self.setFetchFailure(
-                            count: failureCount,
-                            error: QueryError(error),
-                            for: queryHash
-                        )
-
-                        if delayMs > 0 {
-                            try await Task.sleep(nanoseconds: UInt64(delayMs) * 1_000_000)
-                        }
-                        if Task.isCancelled {
-                            cancellationToken.cancel()
-                            throw QueryClientError.cancelled
-                        }
-
-                        if !self.canContinue(options.networkMode) {
-                            self.setFetchStatus(.paused, for: queryHash)
-                            await self.waitUntilCanContinue(options.networkMode)
-                            self.setFetchStatus(.fetching, for: queryHash)
-                        }
-                    }
                 }
-            } catch is CancellationError {
-                cancellationToken.cancel()
-                throw QueryClientError.cancelled
             }
         }
 
@@ -602,8 +680,9 @@ public actor QueryClient {
         record.fetchTask = task
         queries[queryHash] = record
 
-        do {
-            let value = try await task.value
+        let output = await task.value
+        switch output {
+        case let .success(value):
             var latest = queries[queryHash] ?? record
             latest.fetchTask = nil
             latest.data = value
@@ -619,34 +698,40 @@ public actor QueryClient {
             queries[queryHash] = latest
             notifyObservers(for: queryHash)
             scheduleGc(for: queryHash)
-            return value
-        } catch {
+            return .success(value)
+        case let .failure(errorValue):
             var latest = queries[queryHash] ?? record
             latest.fetchTask = nil
             latest.fetchStatus = .idle
-
-            if let queryError = error as? QueryClientError, case .cancelled = queryError {
-                queries[queryHash] = latest
-                notifyObservers(for: queryHash)
-                if let data = latest.data {
-                    return data
-                }
-                throw QueryClientError.cancelled
-            }
-
-            let queryError = QueryError(error)
-            latest.error = queryError
+            latest.error = errorValue
             latest.errorUpdateCount += 1
             latest.errorUpdatedAt = Date()
             latest.fetchFailureCount += 1
-            latest.fetchFailureReason = queryError
+            latest.fetchFailureReason = errorValue
             latest.status = .error
             latest.isInvalidated = true
             queries[queryHash] = latest
             notifyObservers(for: queryHash)
             scheduleGc(for: queryHash)
-            throw error
+            return .failure(errorValue)
+        case .cancelled:
+            var latest = queries[queryHash] ?? record
+            latest.fetchTask = nil
+            latest.fetchStatus = .idle
+            queries[queryHash] = latest
+            notifyObservers(for: queryHash)
+            if let data = latest.data {
+                return .success(data)
+            }
+            return .cancelled
         }
+    }
+
+    private func errorForRetry(_ value: AnySendableValue) -> any Error {
+        if let error = value.rawValue as? any Error {
+            return error
+        }
+        return QueryClientInfrastructureError.queryFailure(queryHash: "unknown")
     }
 
     private func matchingQueryHashes(filters: QueryFilters) -> [String] {
@@ -708,7 +793,7 @@ public actor QueryClient {
             return !isActive(record)
         }
 
-        return record.options.queryFn == nil || (record.dataUpdateCount + record.errorUpdateCount == 0)
+        return record.options.query == nil || (record.dataUpdateCount + record.errorUpdateCount == 0)
     }
 
     private func isStatic(_ record: QueryRecord) -> Bool {
@@ -798,7 +883,7 @@ public actor QueryClient {
         }
     }
 
-    private func makeAnyResult(record: QueryRecord, options: AnyQueryOptions) -> AnyQueryResult {
+    private func makeAnyState(record: QueryRecord, options: AnyQueryOptions) -> AnyQueryState {
         let isFetching = record.fetchStatus == .fetching
         let isPending = record.status == .pending
         let isError = record.status == .error
@@ -806,7 +891,7 @@ public actor QueryClient {
         let isEnabled = options.enabled.resolve(stateSummary(for: record))
         let stale = isEnabled && isStaleByTime(record: record, staleTime: options.staleTime)
 
-        return AnyQueryResult(
+        return AnyQueryState(
             status: record.status,
             fetchStatus: record.fetchStatus,
             data: record.data,
@@ -837,7 +922,7 @@ public actor QueryClient {
 
         for observerID in record.observers {
             guard let observer = observers[observerID] else { continue }
-            observer.emit(makeAnyResult(record: record, options: observer.options))
+            observer.emit(makeAnyState(record: record, options: observer.options))
         }
     }
 
@@ -895,7 +980,7 @@ public actor QueryClient {
             }
 
             Task {
-                _ = try? await self.fetch(queryHash: record.queryHash, options: observer.options, cancelRefetch: false)
+                _ = await self.fetchOutput(queryHash: record.queryHash, options: observer.options, cancelRefetch: false)
             }
         }
     }
@@ -909,7 +994,7 @@ public actor QueryClient {
             }
 
             Task {
-                _ = try? await self.fetch(queryHash: record.queryHash, options: observer.options, cancelRefetch: false)
+                _ = await self.fetchOutput(queryHash: record.queryHash, options: observer.options, cancelRefetch: false)
             }
         }
     }
@@ -932,7 +1017,7 @@ public actor QueryClient {
         notifyObservers(for: queryHash)
     }
 
-    private func setFetchFailure(count: Int, error: QueryError, for queryHash: String) {
+    private func setFetchFailure(count: Int, error: AnySendableValue, for queryHash: String) {
         guard var record = queries[queryHash] else { return }
         record.fetchFailureCount = count
         record.fetchFailureReason = error

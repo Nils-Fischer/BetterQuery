@@ -1,22 +1,14 @@
 import Foundation
 
-public struct QueryError: Error, @unchecked Sendable {
-    public let underlying: any Error
-
-    public init(_ underlying: any Error) {
-        self.underlying = underlying
-    }
-}
-
-public struct QueryResult<Data: Sendable>: Sendable {
+public struct QueryState<Data: Sendable, Failure: Error & Sendable>: Sendable {
     public let status: QueryStatus
     public let fetchStatus: FetchStatus
     public let data: Data?
     public let dataUpdatedAt: Date?
-    public let error: QueryError?
+    public let error: Failure?
     public let errorUpdatedAt: Date?
     public let failureCount: Int
-    public let failureReason: QueryError?
+    public let failureReason: Failure?
     public let isPending: Bool
     public let isSuccess: Bool
     public let isError: Bool
@@ -31,15 +23,15 @@ public struct QueryResult<Data: Sendable>: Sendable {
     public let isEnabled: Bool
 }
 
-public struct AnyQueryResult: Sendable {
+public struct AnyQueryState: Sendable {
     public let status: QueryStatus
     public let fetchStatus: FetchStatus
     public let data: AnySendableValue?
     public let dataUpdatedAt: Date?
-    public let error: QueryError?
+    public let error: AnySendableValue?
     public let errorUpdatedAt: Date?
     public let failureCount: Int
-    public let failureReason: QueryError?
+    public let failureReason: AnySendableValue?
     public let isPending: Bool
     public let isSuccess: Bool
     public let isError: Bool

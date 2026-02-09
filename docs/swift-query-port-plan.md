@@ -306,3 +306,40 @@ These can be layered after core parity is stable.
 This document is the canonical implementation roadmap.
 
 When architecture, defaults, API surface, or phase status changes, update this document in the same change set.
+
+## Breaking API Update: Result-First Typed Failures (2026-02-08)
+
+### Implemented contract
+
+- Replaced throw-based query function with Result-first typed query options:
+  - `QueryOptions<Data, Failure>` with `query: @Sendable (QueryFunctionContext) async -> Result<Data, Failure>`.
+- Replaced `QueryResult` with typed `QueryState<Data, Failure>`.
+- Replaced query entrypoints:
+  - `observe(_:) -> AsyncStream<QueryState<Data, Failure>>`
+  - `fetch(_:) async -> Result<Data, Failure>`
+  - `refetch(_:, cancelRefetch:) async -> Result<Data, Failure>`
+- SwiftUI wrappers are typed on failure:
+  - `QueryObservable<Data, Failure>`
+  - `QueriesObservable<Data, Failure, Combined>`
+- Removed public throw-based query API surface and `QueryError` wrapper.
+
+### Runtime invariants
+
+- A query hash is bound to one `(Data, Failure)` pair.
+- Reusing the same query hash with a different data or failure type is treated as a programmer contract violation (deterministic precondition failure).
+
+### Default behavior parity retained
+
+- Imperative `fetch` keeps retry disabled by default.
+- Observer-driven fetches keep default retry attempts at `3`.
+- Retry delay default remains exponential backoff capped at `30s`.
+- Retry delay resolver remains zero-based by failure count.
+- Cache, invalidation, stale evaluation, and GC semantics are unchanged.
+
+### Migration checklist
+
+- [x] Core API migrated to Result-first typed failures.
+- [x] SwiftUI observable layer migrated to typed failures.
+- [x] Core test suite migrated and passing.
+- [x] README and DocC examples migrated.
+- [ ] Downstream consumers migrated (LocatrCore in progress).
